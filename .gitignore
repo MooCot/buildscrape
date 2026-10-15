@@ -1,0 +1,7 @@
+CLAUDE.md
+MODEL-buildscrape.md
+ТЕОРИЯ-УГЛУБЛЁННО.md
+
+# сборка/логи
+bin/
+*.log

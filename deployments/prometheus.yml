@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: buildscrape
+    static_configs:
+      - targets:
+          - serve:8080
+          - worker-fetch:8080
+          - worker-parse:8080
+          - worker-media:8080
+          - worker-geocode:8080
+          - worker-ai:8080
+    # TODO: /metrics-эндпоинт (prometheus/client_golang) появляется в
+    # internal/platform/observability при переходе с NoopRecorder на
+    # реальный — см. ТЕОРИЯ-УГЛУБЛЁННО.md §7 (типы метрик, cardinality).

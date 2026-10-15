@@ -1,0 +1,36 @@
+# depguard — гексагональная изоляция как проверяемое правило, не только
+# code-review-совет (CLAUDE.md §8, "Правило зависимостей").
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - depguard
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+
+linters-settings:
+  depguard:
+    rules:
+      # domain любой стадии — только stdlib + свой пакет + core + shared/domain.
+      stage-domain:
+        files:
+          - "internal/*/domain/**/*.go"
+        deny:
+          - pkg: "buildscrape/internal/*/adapter"
+            desc: "domain не импортирует adapter (никакой, даже своей стадии) — инверсия зависимостей"
+          - pkg: "buildscrape/internal/platform"
+            desc: "domain не импортирует platform напрямую — только через собственные порты"
+          - pkg: "github.com/rabbitmq/amqp091-go"
+            desc: "domain не знает о транспорте"
+          - pkg: "github.com/jackc/pgx/v5"
+            desc: "domain не знает о драйвере БД"
+
+# ПРИМЕЧАНИЕ (честно, не для вида): "adapter одной стадии не импортирует
+# domain ДРУГОЙ стадии" депгардом как статическим pkg-паттерном на файл не
+# выражается — правило зависит от ТОГО, в какой стадии лежит сам файл
+# (нужен backreference "запрети всё, кроме domain своей же стадии", которого
+# depguard не поддерживает). До кастомного линтера/скрипта — проверяется
+# ревью по правилу из CLAUDE.md §8, не автоматически этим файлом.

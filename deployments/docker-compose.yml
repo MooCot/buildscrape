@@ -1,0 +1,139 @@
+# Переменные окружения приложения: без POSTGRES_DSN/RABBITMQ_URL роли молча
+# стартуют на Noop-заглушках (composition root, cmd/buildscrape/infra.go) —
+# то есть "запустилось", но ничего не делает. Поэтому они заданы здесь явно.
+x-app-env: &app-env
+  POSTGRES_DSN: postgres://buildscrape:buildscrape@postgres:5432/buildscrape?sslmode=disable
+  RABBITMQ_URL: amqp://buildscrape:buildscrape@rabbitmq:5672/
+
+# restart: on-failure — воркер, потерявший брокер/БД, выходит с ненулевым кодом
+# (queue.ErrDeliveriesClosed и т.п.), и оркестратор его перезапускает; при
+# "код 0 и тишина" перезапускать было бы нечего.
+x-app: &app
+  build:
+    context: ..
+    dockerfile: deployments/Dockerfile
+  restart: on-failure
+  environment:
+    <<: *app-env
+
+services:
+  postgres:
+    image: postgres:16.4
+    environment:
+      POSTGRES_DB: buildscrape
+      POSTGRES_USER: buildscrape
+      POSTGRES_PASSWORD: buildscrape
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # 0001_init.sql, 0002_source_poll_state.sql — по алфавиту. Выполняются
+      # ТОЛЬКО на пустом томе: после добавления новой миграции — `docker
+      # compose down -v` (данные демо не жалко) или применить руками.
+      - ../migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U buildscrape"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    environment:
+      # Пользователь guest доступен только с localhost брокера — из соседнего
+      # контейнера подключение отклонялось бы (ACCESS_REFUSED). Заводим своего.
+      RABBITMQ_DEFAULT_USER: buildscrape
+      RABBITMQ_DEFAULT_PASS: buildscrape
+    ports:
+      - "15672:15672" # management UI — смотреть очереди/DLQ/retry-ступени
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  minio:
+    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: buildscrape
+      MINIO_ROOT_PASSWORD: buildscrape
+
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    depends_on:
+      - prometheus
+
+  # Демо-источник (CLAUDE.md §2): фейковые объявления с 429/503/CAPTCHA.
+  # Регистрация как Source: см. README, "Запуск демо".
+  mock-source:
+    <<: *app
+    command: ["mock-source", "--listings", "300"]
+    ports:
+      - "9090:9090"
+
+  serve:
+    <<: *app
+    command: ["serve"]
+    environment:
+      <<: *app-env
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-} # пусто ⟹ admin API открыт (только для демо)
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+
+  worker-fetch:
+    <<: *app
+    command: ["worker", "fetch"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    # Масштабирование: docker compose up --scale worker-fetch=10 (CLAUDE.md
+    # §4.1) — ускоряет разбор fetch.queue. Планировщик в каждом инстансе
+    # безопасен: ClaimDue атомарен, источник достаётся ровно одному.
+
+  worker-parse:
+    <<: *app
+    command: ["worker", "parse"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+  worker-media:
+    <<: *app
+    command: ["worker", "media"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      minio: { condition: service_started }
+
+  worker-geocode:
+    <<: *app
+    command: ["worker", "geocode"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+  worker-ai:
+    <<: *app
+    command: ["worker", "ai"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+
+  worker-cleanup:
+    <<: *app
+    command: ["worker", "cleanup"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    # cron-подобная роль — НЕ зависит от rabbitmq (не consumer, CLAUDE.md §3.7)
+
+volumes:
+  postgres_data:
