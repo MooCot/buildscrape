@@ -7,8 +7,12 @@ hexagonal architecture (ports & adapters).
 ## Running the demo
 
 ```bash
-make compose-up          # postgres/rabbitmq/minio/prometheus/grafana + mock-source + all roles
+make compose-up          # postgres/rabbitmq/prometheus/grafana + mock-source + all roles
 ```
+
+MinIO was dropped from the compose file (October 2025 — `minio/minio` stopped serving anonymous pulls on both Docker Hub and quay.io); `MinIOStore` is a no-op stub regardless, so nothing is lost by its absence yet.
+
+On this host, bringing up all ~12 containers in one shot can make RabbitMQ miss its healthcheck window under the simultaneous I/O load (`.erlang.cookie: eacces`, see git history) — if that happens, bring up `postgres rabbitmq` first, wait for `healthy`, then `up -d` the rest.
 
 The demo source (`mock-source`, port 9090) serves 300 fake listings with
 unstable markup, 429/503s and CAPTCHA stubs. For the pipeline to start
@@ -49,7 +53,28 @@ make test-unit    # unit + contract + in-process end-to-end (real HTTP, in-memor
 ```
 
 `test/inprocess` runs the mock-source → Fetch → Parse chain on real
-components; SQL and AMQP aren't included (that's `test/e2e`, still empty).
+components; SQL and AMQP aren't included (that's `test/e2e`, still empty —
+see "Verified on live infrastructure" below for a manual run against real
+Postgres/RabbitMQ).
+
+## Verified on live infrastructure (2026-10-16)
+
+A full run against real Postgres + RabbitMQ (`make compose-up`, no fakes) —
+not yet automated as `test/e2e`, done manually once to validate the riskiest
+code (`ClaimDue` under concurrency, retry dead-lettering, the Parse upsert):
+
+- All 300 mock-source listings went end to end: Fetch → Parse → Media /
+  Geocode / AI, zero permanent failures except one pre-existing `fetch.dlq`
+  entry unrelated to this run.
+- Scaling demo (roadmap step 2), run to the end of the chain, not just the
+  first stage: `--scale worker-fetch=10` drained `fetch.queue` but pushed
+  the backlog onto `parse.queue` (1 worker); `--scale worker-parse=5` drained
+  that and pushed it onto `media`/`geocode`/`ai.queue` (1 worker each);
+  `--scale worker-media=5 --scale worker-geocode=5 --scale worker-ai=5`
+  finally drained everything to zero. `media` turned out to be the heaviest
+  single stage (its per-item loop over photos × 3 output sizes). End state:
+  300/300 items processed, 56081 rows in `pipeline_events` tracing every
+  stage transition of the run.
 
 ## Structure
 
@@ -57,6 +82,7 @@ components; SQL and AMQP aren't included (that's `test/e2e`, still empty).
 cmd/buildscrape/           composition root (serve / worker <stage> / mock-source)
 internal/<stage>/          domain (no external dependencies) + adapter/{inbound,outbound}
 internal/shared/domain/    domain ports and error sentinels shared across stages (ItemGateChecker, SourceRepository, ErrPermanent)
+internal/shared/adapter/   EventRecorder — the one PublishStageEvent implementation for parse/media/geocode/ai (writes pipeline_events, publishes pipeline.events best-effort)
 internal/shared/contracts/ inter-stage message format (RabbitMQ) — adapter-only, not imported by domain
 internal/platform/         infrastructure wrappers (queue/db/config/observability/htmlx)
 internal/core/             immutable core — constants + append-only pipeline version registry

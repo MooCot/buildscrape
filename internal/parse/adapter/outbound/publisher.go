@@ -11,8 +11,10 @@ import (
 	"github.com/google/uuid"
 )
 
-// AMQPPublisher реализует parse/domain.NextStagePublisher +
-// parse/domain.EventPublisher.
+// AMQPPublisher реализует parse/domain.NextStagePublisher (хендофф задания
+// следующей стадии). EventPublisher (PublishStageEvent) — отдельно,
+// shared/adapter/outbound.EventRecorder (MODEL-buildscrape.md §1.5 правка,
+// см. его doc-comment) — не этот тип.
 type AMQPPublisher struct {
 	conn queue.Client
 }
@@ -47,14 +49,4 @@ func (p *AMQPPublisher) PublishAIJob(ctx context.Context, itemID uuid.UUID, desc
 		return err
 	}
 	return p.conn.Publish(ctx, "ai.exchange", "", body)
-}
-
-func (p *AMQPPublisher) PublishStageEvent(ctx context.Context, itemID uuid.UUID, stage, status, errMsg string) error {
-	body, err := json.Marshal(shared.ItemProcessedEvent{
-		Envelope: p.envelope(itemID), Stage: stage, Status: status, Error: errMsg,
-	})
-	if err != nil {
-		return err
-	}
-	return p.conn.Publish(ctx, "pipeline.events", "", body) // fanout — routing key игнорируется
 }

@@ -50,12 +50,18 @@ services:
       timeout: 3s
       retries: 5
 
-  minio:
-    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
-    command: server /data
-    environment:
-      MINIO_ROOT_USER: buildscrape
-      MINIO_ROOT_PASSWORD: buildscrape
+  # minio временно убран: minio/minio закрыли анонимный pull и на Docker Hub,
+  # и на quay.io (осень 2025) — тег ниже больше не тянется. MinIOStore
+  # (internal/media/adapter/outbound/minio_store.go) пока сам — заглушка
+  # (Put = no-op), контейнер ни с чем не общался, поэтому удаление сейчас
+  # ничего не теряет. Вернуть на рабочем образе (Chainguard/форк), когда
+  # дойдём до реальной реализации Media-стадии.
+  # minio:
+  #   image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+  #   command: server /data
+  #   environment:
+  #     MINIO_ROOT_USER: buildscrape
+  #     MINIO_ROOT_PASSWORD: buildscrape
 
   prometheus:
     image: prom/prometheus:v2.55.0
@@ -112,7 +118,6 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
-      minio: { condition: service_started }
 
   worker-geocode:
     <<: *app

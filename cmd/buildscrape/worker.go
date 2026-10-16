@@ -31,8 +31,11 @@ import (
 
 	storageadapteroutbound "buildscrape/internal/storage/adapter/outbound"
 
+	sharedadapteroutbound "buildscrape/internal/shared/adapter/outbound"
+
 	"buildscrape/internal/core"
 	"buildscrape/internal/platform/config"
+	"buildscrape/internal/platform/queue"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -59,23 +62,41 @@ func runWorker(stage string) error {
 	}
 	defer pool.Close()
 
-	q, err := newQueueClient(cfg.RabbitMQURL)
-	if err != nil {
-		return fmt.Errorf("queue connect: %w", err)
-	}
-	if closer, ok := q.(interface{ Close() error }); ok {
-		defer closer.Close()
+	// cleanup — housekeeping на своём таймере, не AMQP-консюмер (MODEL-
+	// buildscrape.md §9, SR-cleanup: "не переиспользует internal/platform/
+	// queue"); единственная стадия без подключения к очереди вообще.
+	var q queue.Client
+	qMode := "n/a (cleanup)"
+	if stage != "cleanup" {
+		q, err = newQueueClient(cfg.RabbitMQURL)
+		if err != nil {
+			return fmt.Errorf("queue connect: %w", err)
+		}
+		if closer, ok := q.(interface{ Close() error }); ok {
+			defer closer.Close()
+		}
+		qMode = "noop"
+		if cfg.RabbitMQURL != "" {
+			qMode = "real AMQP"
+		}
 	}
 
 	sourceRepo := storageadapteroutbound.NewPostgresSourceRepository(pool)
 	gate := storageadapteroutbound.NewPostgresItemGateChecker(pool, sourceRepo)
+	// Один EventRecorder на все 4 item-стадии (Parse/Media/Geocode/AI) — не
+	// по экземпляру на стадию: MODEL-buildscrape.md §1.5 правка, см. его
+	// doc-comment. Fetch/Storage/Cleanup не участвуют — у них на момент
+	// действия либо ещё нет Item (Fetch, FK pipeline_events.item_id →
+	// items.id не позволит), либо действие над Source, а не над Item
+	// (Storage F7/F8/F9).
+	var events *sharedadapteroutbound.EventRecorder
+	if stage != "cleanup" {
+		events = sharedadapteroutbound.NewEventRecorder(pool, q)
+	}
 
-	dbMode, qMode := "noop", "noop"
+	dbMode := "noop"
 	if cfg.PostgresDSN != "" {
 		dbMode = "real Postgres"
-	}
-	if cfg.RabbitMQURL != "" {
-		qMode = "real AMQP"
 	}
 	fmt.Printf("worker %s: starting (db=%s, queue=%s)\n", stage, dbMode, qMode)
 
@@ -106,8 +127,8 @@ func runWorker(stage string) error {
 		err = g.Wait()
 
 	case "parse":
-		parsePub := parseadapteroutbound.NewAMQPPublisher(q) // реализует и NextStagePublisher, и EventPublisher
-		svc := parsedomain.NewService(parseadapteroutbound.HTMLExtractor{}, parseadapteroutbound.NewPostgresItemWriter(pool), parsePub, parsePub)
+		parsePub := parseadapteroutbound.NewAMQPPublisher(q) // NextStagePublisher (хендофф задания)
+		svc := parsedomain.NewService(parseadapteroutbound.HTMLExtractor{}, parseadapteroutbound.NewPostgresItemWriter(pool), parsePub, events)
 		err = parseadapterinbound.NewAMQPConsumer(q, svc).Run(ctx)
 
 	case "media":
@@ -116,7 +137,7 @@ func runWorker(stage string) error {
 			mediaadapteroutbound.NewImageMagickProcessor(),
 			mediaadapteroutbound.NewMinIOStore(""),
 			mediaadapteroutbound.NewPostgresMediaWriter(pool),
-			mediaadapteroutbound.NewAMQPEventPublisher(q),
+			events,
 		)
 		err = mediaadapterinbound.NewAMQPConsumer(q, svc).Run(ctx)
 
@@ -126,7 +147,7 @@ func runWorker(stage string) error {
 			geocodeadapteroutbound.NewGeocoderAPI(),
 			geocodeadapteroutbound.NewPostgresAddressCache(pool),
 			geocodeadapteroutbound.NewPostgresItemGeoWriter(pool),
-			geocodeadapteroutbound.NewAMQPEventPublisher(q),
+			events,
 		)
 		err = geocodeadapterinbound.NewAMQPConsumer(q, svc).Run(ctx)
 
@@ -140,7 +161,7 @@ func runWorker(stage string) error {
 		svc := aidomain.NewService(
 			gate, providers, breakerStore,
 			aiadapteroutbound.NewPostgresItemAIWriter(pool),
-			aiadapteroutbound.NewAMQPEventPublisher(q),
+			events,
 		)
 		err = aiadapterinbound.NewAMQPConsumer(q, svc).Run(ctx)
 
