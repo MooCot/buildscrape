@@ -71,13 +71,19 @@ func setupRabbitMQ(t *testing.T) queue.Client {
 	t.Helper()
 	ctx := context.Background()
 
-	// Дедлайн 2 мин, не дефолтные 60с — на этой машине RabbitMQ стабильно
-	// грузится дольше минуты даже в одиночном контейнере (та же
-	// особенность, что уже наблюдалась при живом docker compose up в этой
-	// сессии — ~54с без конкурентной нагрузки, здесь выходит за дефолт).
-	// WithWaitStrategy (не AndDeadline) хардкодит 60с дедлайн СВЕРХУ любой
-	// переданной стратегии (options.go:314 этой же библиотеки) — поэтому
-	// именно AndDeadline, не WithStartupTimeout на самой wait.Strategy.
+	// Дедлайн 2 мин, не дефолтные 60с — на этой машине RabbitMQ грузится
+	// нестабильно (один прогон ~27с, следующий >60с). ДВА независимых
+	// таймаута нужно поднять, не один — поднятие только одного из них всё
+	// равно даёт эффективный потолок 60с, именно так тест и падал:
+	//  1. LogStrategy.timeout (wait/log.go) — если не задан явно через
+	//     .WithStartupTimeout на САМОЙ стратегии (а не снаружи), внутри
+	//     WaitUntilReady используется defaultStartupTimeout()=60с через
+	//     собственный derived context.WithTimeout, независимый от внешнего
+	//     дедлайна MultiStrategy.
+	//  2. MultiStrategy.deadline (wait/all.go, ForAll(...).WithDeadline) —
+	//     внешний потолок поверх всех стратегий сразу; WithWaitStrategy
+	//     (не AndDeadline) хардкодит его в 60с (options.go:314 той же
+	//     библиотеки), поэтому именно AndDeadline.
 	// WithAdminUsername/Password НЕ используются намеренно: модуль
 	// одновременно хардкодит RABBITMQ_DEFAULT_USER/PASS=guest в Env (до
 	// применения опций, rabbitmq.go Run()) И пишет default_user/default_pass
@@ -87,7 +93,7 @@ func setupRabbitMQ(t *testing.T) queue.Client {
 	ctr, err := rabbitmq.Run(ctx, "rabbitmq:3.13-management",
 		testcontainers.WithWaitStrategyAndDeadline(
 			2*time.Minute,
-			wait.ForLog("Server startup complete"),
+			wait.ForLog("Server startup complete").WithStartupTimeout(2*time.Minute),
 		),
 	)
 	if err != nil {
