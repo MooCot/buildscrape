@@ -94,7 +94,6 @@ services:
     command: ["serve"]
     environment:
       <<: *app-env
-      ADMIN_TOKEN: ${ADMIN_TOKEN:-} # пусто ⟹ admin API открыт (только для демо)
     depends_on:
       postgres:
         condition: service_healthy

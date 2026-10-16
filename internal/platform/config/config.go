@@ -16,8 +16,6 @@ type Config struct {
 	RabbitMQURL   string
 	MinIOEndpoint string
 	Prefetch      int
-	// AdminToken — bearer-токен для /admin/*; пусто ⟹ admin API открыт (демо).
-	AdminToken string
 }
 
 func Load() Config {
@@ -26,7 +24,6 @@ func Load() Config {
 		RabbitMQURL:   os.Getenv("RABBITMQ_URL"),
 		MinIOEndpoint: os.Getenv("MINIO_ENDPOINT"),
 		Prefetch:      envInt("PREFETCH_COUNT", 1),
-		AdminToken:    os.Getenv("ADMIN_TOKEN"),
 	}
 }
 

@@ -13,7 +13,8 @@ ryuk reaper sidecar container doesn't start on Docker Desktop/Windows
 (named-pipe timeout). This has a real cost, not just a cosmetic one — see
 the gotchas section below.
 
-**All 6 planned tests are done** (E2E-1 through E2E-6):
+**All 6 originally planned tests are done** (E2E-1 through E2E-6), plus a
+7th added 2026-10-16 for the RBAC redesign of the admin API:
 
 - `TestParseUpsert_RedeliveredMessageIsIdempotent` (E2E-1) — items upsert
   idempotency (`UNIQUE(source_id, external_id)` + redelivery of the same
@@ -58,6 +59,20 @@ the gotchas section below.
   (`TestClassifyItem_BreakerStateSurvivesRestart`); this test is
   specifically about `PostgresBreakerStore`'s real NULL/TIMESTAMPTZ
   round-trip, which the fake can't reproduce.
+- `TestRBAC_SeedRolesUnionAcrossKeyAndRevocation` (E2E-7, 2026-10-16) — the
+  RBAC redesign of the admin API (replaced the single `ADMIN_TOKEN`,
+  `migrations/0003_api_keys.sql`, `internal/storage/domain/rbac.go`). The
+  unit tests (`handlers_test.go`) exercise `domain.Identity` directly, never
+  touching SQL — this test is the only place the real
+  `permission` Postgres ENUM array and the `array_agg`/`unnest`/JOIN
+  permission-union query get run against a real database: encoding a Go
+  `[]string` through `$N::text[]::permission[]` on write, decoding back via
+  `p::text`/`permissions::text[]` on read without registering a custom pgx
+  type, union-of-permissions-across-roles for a multi-role key, and
+  revoke/idempotency round-trips. Not in MODEL-buildscrape.md — same
+  reasoning as E2E-3's retry/DLQ: RBAC gates access TO F7/F8/F9 from
+  outside, not pipeline state, so it's infrastructure around the model, not
+  an Entity/Gate inside it.
 
 **Run this stack's own `docker compose` stack DOWN before running
 `test/e2e` locally.** The demo stack (`deployments-*`, 12+ containers)

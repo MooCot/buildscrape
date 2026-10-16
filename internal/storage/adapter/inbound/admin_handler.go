@@ -1,9 +1,8 @@
 package inbound
 
 import (
-	"crypto/subtle"
 	"encoding/json"
-	"log/slog"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -17,39 +16,50 @@ const maxBodyBytes = 1 << 20
 
 type AdminHandler struct {
 	admin domain.SourceAdminService
-	token string
+	auth  domain.ApiKeyAuthenticator
 }
 
-// NewAdminHandler — token пуст ⟹ admin API открыт (демо/локально; в лог
-// пишется предупреждение). Непустой ⟹ каждый запрос обязан нести
-// `Authorization: Bearer <token>`.
-func NewAdminHandler(a domain.SourceAdminService, token string) *AdminHandler {
-	if token == "" {
-		slog.Warn("storage: ADMIN_TOKEN не задан — admin API открыт без аутентификации")
-	}
-	return &AdminHandler{admin: a, token: token}
+// NewAdminHandler — RBAC через domain.ApiKeyAuthenticator (rbac.go):
+// заменяет единственный статичный ADMIN_TOKEN (CLAUDE.md "Не сделано" —
+// "единственная защита, без ролей и ротации"). Выдача/ротация ключей —
+// CLI `buildscrape admin create-key`/`revoke-key` (cmd/buildscrape/admin.go),
+// не HTTP: нет вообще ни одного shared-секрета, который нужно было бы
+// передавать этому хендлеру напрямую.
+func NewAdminHandler(a domain.SourceAdminService, authSvc domain.ApiKeyAuthenticator) *AdminHandler {
+	return &AdminHandler{admin: a, auth: authSvc}
 }
 
 func (h *AdminHandler) Routes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /admin/sources", h.auth(h.createSource))               // F7
-	mux.HandleFunc("PATCH /admin/sources/{id}/enabled", h.auth(h.setEnabled))   // F8
-	mux.HandleFunc("POST /admin/sources/{id}/archive", h.auth(h.archiveSource)) // F9
+	mux.HandleFunc("POST /admin/sources", h.requirePermission(domain.PermSourcesWrite, h.createSource))               // F7
+	mux.HandleFunc("PATCH /admin/sources/{id}/enabled", h.requirePermission(domain.PermSourcesToggle, h.setEnabled))   // F8
+	mux.HandleFunc("POST /admin/sources/{id}/archive", h.requirePermission(domain.PermSourcesArchive, h.archiveSource)) // F9
 }
 
-// auth — bearer-токен, сравнение за константное время (subtle): обычное
-// сравнение строк выдаёт длину общего префикса по времени ответа.
-func (h *AdminHandler) auth(next http.HandlerFunc) http.HandlerFunc {
+// requirePermission — два разных отказа, не один "unauthorized" на всё:
+// 401 (токен отсутствует/неизвестен/отозван — ErrUnauthenticated,
+// неразличимо по rbac.go) vs 403 (токен валиден, но у его ролей нет
+// именно этого права). Раньше (ADMIN_TOKEN) различия не было вообще —
+// один секрет открывал все три admin-действия одинаково.
+func (h *AdminHandler) requirePermission(perm domain.Permission, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if h.token != "" {
-			// CutPrefix, а не TrimPrefix: TrimPrefix молча пропустил бы голый
-			// токен без схемы "Bearer" (префикса нет — нечего срезать, строка
-			// осталась равной токену).
-			got, hasScheme := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if !hasScheme || subtle.ConstantTimeCompare([]byte(got), []byte(h.token)) != 1 {
+		raw, hasScheme := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !hasScheme {
+			raw = ""
+		}
+
+		identity, err := h.auth.Authenticate(r.Context(), raw)
+		if err != nil {
+			if errors.Is(err, domain.ErrUnauthenticated) {
 				w.Header().Set("WWW-Authenticate", "Bearer")
 				writeError(w, http.StatusUnauthorized, "unauthorized")
 				return
 			}
+			writeError(w, http.StatusInternalServerError, "authentication failed")
+			return
+		}
+		if !identity.Has(perm) {
+			writeError(w, http.StatusForbidden, "forbidden: missing permission "+string(perm))
+			return
 		}
 		next(w, r)
 	}

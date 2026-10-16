@@ -15,22 +15,37 @@ MinIO was dropped from the compose file (October 2025 — `minio/minio` stopped 
 On this host, bringing up all ~12 containers in one shot can make RabbitMQ miss its healthcheck window under the simultaneous I/O load (`.erlang.cookie: eacces`, see git history) — if that happens, bring up `postgres rabbitmq` first, wait for `healthy`, then `up -d` the rest.
 
 The demo source (`mock-source`, port 9090) serves 300 fake listings with
-unstable markup, 429/503s and CAPTCHA stubs. For the pipeline to start
-polling it, register it as a source:
+unstable markup, 429/503s and CAPTCHA stubs. The admin API is RBAC-protected
+(no single shared `ADMIN_TOKEN` anymore) — bootstrap a key first, directly
+against Postgres, bypassing HTTP (chicken-and-egg: creating a key through
+the admin API would itself require one):
+
+```bash
+docker compose exec serve buildscrape admin create-key --label=bootstrap --role=admin
+# prints the raw token ONCE — only its hash is stored, save it now
+```
+
+Then register the source with that token:
 
 ```bash
 curl -X POST http://localhost:8080/admin/sources \
   -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \      # if ADMIN_TOKEN is unset — the header isn't needed
+  -H "Authorization: Bearer <token from create-key>" \
   -d '{"name":"mock","base_url":"http://mock-source:9090/listings","poll_interval_sec":60}'
 ```
+
+Seeded roles (`migrations/0003_api_keys.sql`): `admin` (all three admin
+actions), `operator` (enable/disable only), `publisher` (create only). Manage
+further: `buildscrape admin create-role/list-roles/create-key/revoke-key
+--help`.
 
 Within ~30 seconds the Fetch scheduler picks up the source, spreads the
 listings onto `fetch.queue`, and the workers download and parse them:
 
 ```bash
 curl http://localhost:8080/items?q=house          # public listing feed
-curl -X PATCH http://localhost:8080/admin/sources/<id>/enabled -d '{"enabled":false}'   # pause
+curl -X PATCH http://localhost:8080/admin/sources/<id>/enabled \
+  -H "Authorization: Bearer <token>" -d '{"enabled":false}'   # pause (needs sources:toggle)
 ```
 
 Queues, retry stages and the DLQ — in the RabbitMQ management UI: http://localhost:15672

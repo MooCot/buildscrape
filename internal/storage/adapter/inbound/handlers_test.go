@@ -69,6 +69,32 @@ func (f *fakeAdmin) Archive(ctx context.Context, id uuid.UUID) error {
 	return f.opErr
 }
 
+// fakeAuthenticator — заменяет константный "" (admin открыт) из старого
+// контракта NewAdminHandler(a, token string): теперь нужна РЕАЛИЗАЦИЯ
+// domain.ApiKeyAuthenticator, а не просто пустая строка.
+type fakeAuthenticator struct {
+	identity domain.Identity
+	err      error
+	gotToken string
+}
+
+func (f *fakeAuthenticator) Authenticate(ctx context.Context, rawToken string) (domain.Identity, error) {
+	f.gotToken = rawToken
+	return f.identity, f.err
+}
+
+// allowAllAuth — все 3 права сразу; подставляется в тесты, которым сама
+// RBAC не важна (проверяют CreateSource/SetEnabled/Archive как таковые) —
+// старые тесты раньше звали adminMux(a, allowAllAuth()) (admin открыт), сейчас это
+// прямой эквивалент на новом контракте.
+func allowAllAuth() *fakeAuthenticator {
+	return &fakeAuthenticator{identity: domain.Identity{Permissions: map[domain.Permission]bool{
+		domain.PermSourcesWrite:   true,
+		domain.PermSourcesToggle:  true,
+		domain.PermSourcesArchive: true,
+	}}}
+}
+
 func do(t *testing.T, mux *http.ServeMux, method, target, body string, hdr map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
@@ -86,9 +112,9 @@ func itemsMux(q domain.ItemQueryService) *http.ServeMux {
 	return mux
 }
 
-func adminMux(a domain.SourceAdminService, token string) *http.ServeMux {
+func adminMux(a domain.SourceAdminService, auth domain.ApiKeyAuthenticator) *http.ServeMux {
 	mux := http.NewServeMux()
-	NewAdminHandler(a, token).Routes(mux)
+	NewAdminHandler(a, auth).Routes(mux)
 	return mux
 }
 
@@ -184,7 +210,7 @@ func TestGetItem_BadIDIs400(t *testing.T) {
 
 func TestCreateSource_201AndDefaultsEnabledTrue(t *testing.T) {
 	a := &fakeAdmin{}
-	rec := do(t, adminMux(a, ""), "POST", "/admin/sources", `{"name":"mock","base_url":"http://m/listings"}`, nil)
+	rec := do(t, adminMux(a, allowAllAuth()), "POST", "/admin/sources", `{"name":"mock","base_url":"http://m/listings"}`, nil)
 
 	if rec.Code != 201 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
@@ -200,7 +226,7 @@ func TestCreateSource_201AndDefaultsEnabledTrue(t *testing.T) {
 
 func TestCreateSource_ExplicitEnabledFalseIsRespected(t *testing.T) {
 	a := &fakeAdmin{}
-	do(t, adminMux(a, ""), "POST", "/admin/sources", `{"name":"x","base_url":"http://m","enabled":false}`, nil)
+	do(t, adminMux(a, allowAllAuth()), "POST", "/admin/sources", `{"name":"x","base_url":"http://m","enabled":false}`, nil)
 	if a.created.Enabled {
 		t.Error("явное enabled=false проигнорировано")
 	}
@@ -208,7 +234,7 @@ func TestCreateSource_ExplicitEnabledFalseIsRespected(t *testing.T) {
 
 func TestCreateSource_ValidationErrorIs400WithReason(t *testing.T) {
 	a := &fakeAdmin{createErr: fmt.Errorf("%w: name is required", domain.ErrInvalidSource)}
-	rec := do(t, adminMux(a, ""), "POST", "/admin/sources", `{"base_url":"http://m"}`, nil)
+	rec := do(t, adminMux(a, allowAllAuth()), "POST", "/admin/sources", `{"base_url":"http://m"}`, nil)
 	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "name is required") {
 		t.Errorf("code=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -221,7 +247,7 @@ func TestCreateSource_BadJSONAndUnknownFieldsAre400(t *testing.T) {
 		"не объект":        `[]`,
 	} {
 		a := &fakeAdmin{}
-		rec := do(t, adminMux(a, ""), "POST", "/admin/sources", body, nil)
+		rec := do(t, adminMux(a, allowAllAuth()), "POST", "/admin/sources", body, nil)
 		if rec.Code != 400 {
 			t.Errorf("%s: code=%d, want 400", name, rec.Code)
 		}
@@ -233,7 +259,7 @@ func TestCreateSource_BadJSONAndUnknownFieldsAre400(t *testing.T) {
 func TestSetEnabled_204(t *testing.T) {
 	a := &fakeAdmin{}
 	id := uuid.New()
-	rec := do(t, adminMux(a, ""), "PATCH", "/admin/sources/"+id.String()+"/enabled", `{"enabled":false}`, nil)
+	rec := do(t, adminMux(a, allowAllAuth()), "PATCH", "/admin/sources/"+id.String()+"/enabled", `{"enabled":false}`, nil)
 	if rec.Code != 204 || a.enabledID != id || a.enabled == nil || *a.enabled != false {
 		t.Errorf("code=%d id=%v enabled=%v", rec.Code, a.enabledID, a.enabled)
 	}
@@ -241,7 +267,7 @@ func TestSetEnabled_204(t *testing.T) {
 
 func TestSetEnabled_MissingFieldIs400NotSilentFalse(t *testing.T) {
 	a := &fakeAdmin{}
-	rec := do(t, adminMux(a, ""), "PATCH", "/admin/sources/"+uuid.NewString()+"/enabled", `{}`, nil)
+	rec := do(t, adminMux(a, allowAllAuth()), "PATCH", "/admin/sources/"+uuid.NewString()+"/enabled", `{}`, nil)
 	if rec.Code != 400 || a.enabled != nil {
 		t.Errorf("code=%d enabled=%v — пустое тело не должно молча выключать источник", rec.Code, a.enabled)
 	}
@@ -249,14 +275,14 @@ func TestSetEnabled_MissingFieldIs400NotSilentFalse(t *testing.T) {
 
 func TestSetEnabled_UnknownSourceIs404(t *testing.T) {
 	a := &fakeAdmin{opErr: fmt.Errorf("set enabled: %w", shareddomain.ErrNotFound)}
-	rec := do(t, adminMux(a, ""), "PATCH", "/admin/sources/"+uuid.NewString()+"/enabled", `{"enabled":true}`, nil)
+	rec := do(t, adminMux(a, allowAllAuth()), "PATCH", "/admin/sources/"+uuid.NewString()+"/enabled", `{"enabled":true}`, nil)
 	if rec.Code != 404 {
 		t.Errorf("code=%d, want 404", rec.Code)
 	}
 }
 
 func TestSetEnabled_BadIDIs400(t *testing.T) {
-	rec := do(t, adminMux(&fakeAdmin{}, ""), "PATCH", "/admin/sources/nope/enabled", `{"enabled":true}`, nil)
+	rec := do(t, adminMux(&fakeAdmin{}, allowAllAuth()), "PATCH", "/admin/sources/nope/enabled", `{"enabled":true}`, nil)
 	if rec.Code != 400 {
 		t.Errorf("code=%d, want 400", rec.Code)
 	}
@@ -267,18 +293,18 @@ func TestSetEnabled_BadIDIs400(t *testing.T) {
 func TestArchive_204AndUnknownIs404(t *testing.T) {
 	a := &fakeAdmin{}
 	id := uuid.New()
-	if rec := do(t, adminMux(a, ""), "POST", "/admin/sources/"+id.String()+"/archive", "", nil); rec.Code != 204 || a.archived != id {
+	if rec := do(t, adminMux(a, allowAllAuth()), "POST", "/admin/sources/"+id.String()+"/archive", "", nil); rec.Code != 204 || a.archived != id {
 		t.Errorf("code=%d archived=%v", rec.Code, a.archived)
 	}
 	a.opErr = fmt.Errorf("archive: %w", shareddomain.ErrNotFound)
-	if rec := do(t, adminMux(a, ""), "POST", "/admin/sources/"+uuid.NewString()+"/archive", "", nil); rec.Code != 404 {
+	if rec := do(t, adminMux(a, allowAllAuth()), "POST", "/admin/sources/"+uuid.NewString()+"/archive", "", nil); rec.Code != 404 {
 		t.Errorf("code=%d, want 404", rec.Code)
 	}
 }
 
 // Нет обратного эндпоинта: archived→active не существует (MODEL §1.6).
 func TestNoUnarchiveRoute(t *testing.T) {
-	mux := adminMux(&fakeAdmin{}, "")
+	mux := adminMux(&fakeAdmin{}, allowAllAuth())
 	for _, target := range []string{"/admin/sources/" + uuid.NewString() + "/unarchive", "/admin/sources/" + uuid.NewString() + "/restore"} {
 		if rec := do(t, mux, "POST", target, "", nil); rec.Code != 404 {
 			t.Errorf("%s: code=%d, want 404", target, rec.Code)
@@ -286,11 +312,28 @@ func TestNoUnarchiveRoute(t *testing.T) {
 	}
 }
 
-// --- аутентификация ---
+// --- аутентификация/авторизация (RBAC) ---
+
+// tokenGatedAuth — имитирует реальный ApiKeyAuthenticator: успех только
+// при точном совпадении raw-токена (admin_handler.go уже снял схему
+// "Bearer " до вызова Authenticate — здесь это НЕ проверяется повторно,
+// проверяется только то, что raw дошёл как есть).
+type tokenGatedAuth struct {
+	want  string
+	perms map[domain.Permission]bool
+}
+
+func (a *tokenGatedAuth) Authenticate(ctx context.Context, rawToken string) (domain.Identity, error) {
+	if rawToken == "" || rawToken != a.want {
+		return domain.Identity{}, domain.ErrUnauthenticated
+	}
+	return domain.Identity{Permissions: a.perms}, nil
+}
 
 func TestAdminAuth_TokenRequiredWhenConfigured(t *testing.T) {
 	a := &fakeAdmin{}
-	mux := adminMux(a, "s3cret")
+	auth := &tokenGatedAuth{want: "s3cret", perms: map[domain.Permission]bool{domain.PermSourcesArchive: true}}
+	mux := adminMux(a, auth)
 	id := uuid.NewString()
 
 	cases := []struct {
@@ -300,7 +343,7 @@ func TestAdminAuth_TokenRequiredWhenConfigured(t *testing.T) {
 	}{
 		{"без заголовка", nil, 401},
 		{"неверный токен", map[string]string{"Authorization": "Bearer nope"}, 401},
-		{"токен без схемы Bearer", map[string]string{"Authorization": "s3cret"}, 401}, // верный токен, но без схемы — не принимается
+		{"токен без схемы Bearer", map[string]string{"Authorization": "s3cret"}, 401}, // верный токен, но без схемы — CutPrefix не срезал, raw="" дошёл до Authenticate
 		{"верный токен", map[string]string{"Authorization": "Bearer s3cret"}, 204},
 	}
 	for _, tc := range cases {
@@ -316,9 +359,40 @@ func TestAdminAuth_TokenRequiredWhenConfigured(t *testing.T) {
 
 func TestAdminAuth_RejectedRequestNeverReachesService(t *testing.T) {
 	a := &fakeAdmin{}
-	do(t, adminMux(a, "s3cret"), "POST", "/admin/sources", `{"name":"x","base_url":"http://m"}`, nil)
+	auth := &tokenGatedAuth{want: "s3cret", perms: map[domain.Permission]bool{domain.PermSourcesWrite: true}}
+	do(t, adminMux(a, auth), "POST", "/admin/sources", `{"name":"x","base_url":"http://m"}`, nil)
 	if a.created.Name != "" {
 		t.Error("неавторизованный запрос дошёл до сервиса и создал источник")
+	}
+}
+
+// TestAdminAuth_PermissionScopedPerRoute — суть этого RBAC-редизайна: один
+// и тот же валидный ключ может быть разрешён на ОДНО admin-действие и
+// запрещён на другие (403, не 401 — токен валиден, прав не хватает).
+// Раньше (единственный ADMIN_TOKEN) такого разделения не было вообще:
+// валидный токен открывал все три действия одинаково.
+func TestAdminAuth_PermissionScopedPerRoute(t *testing.T) {
+	a := &fakeAdmin{}
+	toggleOnly := &fakeAuthenticator{identity: domain.Identity{
+		Permissions: map[domain.Permission]bool{domain.PermSourcesToggle: true},
+	}}
+	mux := adminMux(a, toggleOnly)
+	hdr := map[string]string{"Authorization": "Bearer whatever"} // fake не сверяет значение, только наличие схемы
+
+	if rec := do(t, mux, "PATCH", "/admin/sources/"+uuid.NewString()+"/enabled", `{"enabled":true}`, hdr); rec.Code != 204 {
+		t.Errorf("toggle: code=%d, want 204 — есть sources:toggle", rec.Code)
+	}
+
+	writeRec := do(t, mux, "POST", "/admin/sources", `{"name":"x","base_url":"http://m"}`, hdr)
+	if writeRec.Code != 403 {
+		t.Errorf("write: code=%d, want 403 — sources:toggle не даёт sources:write", writeRec.Code)
+	}
+	if writeRec.Header().Get("WWW-Authenticate") != "" {
+		t.Error("403 не должен нести WWW-Authenticate — это заголовок для 401 (RFC 7235), токен и так валиден")
+	}
+
+	if rec := do(t, mux, "POST", "/admin/sources/"+uuid.NewString()+"/archive", "", hdr); rec.Code != 403 {
+		t.Errorf("archive: code=%d, want 403 — sources:toggle не даёт sources:archive", rec.Code)
 	}
 }
 

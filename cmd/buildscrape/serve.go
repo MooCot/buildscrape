@@ -35,13 +35,15 @@ func runServe() error {
 
 	sourceRepo := storageadapteroutbound.NewPostgresSourceRepository(pool)
 	itemReader := storageadapteroutbound.NewPostgresItemReader(pool)
+	rbacRepo := storageadapteroutbound.NewPostgresRBACRepository(pool)
 
 	queryService := storagedomain.NewItemQueryService(itemReader)
 	adminService := storagedomain.NewSourceAdminService(sourceRepo)
+	authSvc := storagedomain.NewApiKeyAuthenticator(rbacRepo)
 
 	mux := http.NewServeMux()
 	storageadapterinbound.NewHTTPHandler(queryService).Routes(mux)
-	storageadapterinbound.NewAdminHandler(adminService, cfg.AdminToken).Routes(mux)
+	storageadapterinbound.NewAdminHandler(adminService, authSvc).Routes(mux)
 
 	// F11/П-metrics (MODEL-buildscrape.md §8, CLAUDE.md §10.3) — только
 	// serve опрашивает длину очередей, не каждый worker <stage> отдельно

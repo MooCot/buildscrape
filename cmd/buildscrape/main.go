@@ -38,7 +38,7 @@ func newRootCmd() *cobra.Command {
 		// случаях.
 		SilenceUsage: true,
 	}
-	root.AddCommand(newServeCmd(), newWorkerCmd(), newMockSourceCmd())
+	root.AddCommand(newServeCmd(), newWorkerCmd(), newMockSourceCmd(), newAdminCmd())
 	return root
 }
 
