@@ -17,10 +17,15 @@ container via `t.Cleanup`.
 - `TestParseUpsert_RedeliveredMessageIsIdempotent` — items upsert
   idempotency (`UNIQUE(source_id, external_id)` + redelivery of the same
   message, ТЕОРИЯ-УГЛУБЛЁННО.md §6.2, MODEL-buildscrape.md C1/C2/P4).
+- `TestClaimDue_ConcurrentSchedulersClaimExactlyOnce` — `ClaimDue`
+  mutual exclusion under N concurrent schedulers (`--scale
+  worker-fetch=N`), MODEL-buildscrape.md §1.1bis, C9/P6 — the model is the
+  source of truth here (added 2026-10-16, this invariant used to live only
+  in CLAUDE.md/code comments).
 
 **Candidates not yet written** (CLAUDE.md "Не сделано" — named risks that
-only a real broker/DB can confirm): `ClaimDue` under concurrent schedulers,
-the retry ladder's `x-dead-letter-exchange: ""` requeue trick, the Parse-
-upsert `CASE` not clobbering an already-`blocked_reason` row, the FK on
+only a real broker/DB can confirm): the retry ladder's
+`x-dead-letter-exchange: ""` requeue trick, the Parse-upsert `CASE` not
+clobbering an already-`blocked_reason` row, the FK on
 `pipeline_events.item_id` (MODEL §1.5bis), circuit breaker state surviving
 a process restart.
