@@ -37,7 +37,7 @@ func (c *AMQPConsumer) Run(ctx context.Context) error {
 		err := c.svc.GeocodeItem(ctx, job.ItemID, job.Address)
 		c.recorder.ObserveDuration("geocode", time.Since(start).Seconds())
 		if err != nil {
-			d.Fail(ctx, shareddomain.IsPermanent(err)) // backoff → DLQ после лимита
+			d.Fail(ctx, shareddomain.IsPermanent(err), err.Error()) // backoff → DLQ после лимита
 			continue
 		}
 		_ = d.Ack()

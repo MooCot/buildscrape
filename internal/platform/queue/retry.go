@@ -14,6 +14,16 @@ import (
 // доставка заголовка не несёт — attempt=0.
 const attemptHeader = "x-attempt"
 
+// lastErrorHeader — текст последней ошибки, приложенный к сообщению
+// вручную (не нативный `x-death` RabbitMQ — тот несёт только `reason:
+// rejected`, без текста). Единственный способ увидеть ПОЧЕМУ сообщение
+// застряло в retry-ступени или DLQ без похода в логи воркера — симметрично
+// тому, что Parse/Media/Geocode/AI уже получают через `pipeline_events`
+// (у Fetch такого канала нет и не может быть, FK — MODEL §1.5bis; этот
+// заголовок — общий механизм для всех 5 стадий, не костыль только для
+// Fetch).
+const lastErrorHeader = "x-last-error"
+
 // attemptFromHeaders — числа в amqp.Table приходят разными целочисленными
 // типами в зависимости от того, чем их закодировал отправитель, поэтому
 // type switch, а не одно приведение.
@@ -64,6 +74,14 @@ func RetryQueueName(mainQueue string, attempt int) string {
 // в двух местах пакета.
 func DLQName(mainQueue string) string {
 	return mainQueue[:len(mainQueue)-len(".queue")] + ".dlq"
+}
+
+// DLXName — имя fanout-exchange, к которому привязана DLQ стадии
+// (declareStage объявляет `dlx := s.Exchange + ".dlx"`). Экспортирована
+// для deadLetter в amqp_client.go — ручная публикация туда с заголовком
+// `x-last-error`, не Nack(false) (тот не даёт приложить заголовок).
+func DLXName(exchange string) string {
+	return exchange + ".dlx"
 }
 
 // retryQueueArgs — аргументы wait-очереди одной ступени. Сообщение живёт в

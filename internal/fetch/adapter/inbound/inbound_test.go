@@ -150,6 +150,9 @@ func TestConsumer_TransientError_BacksOff(t *testing.T) {
 	if rec.Retries != 1 || len(rec.Nacks) != 0 || rec.Acks != 0 {
 		t.Errorf("retries=%d nacks=%v acks=%d, want 1/[]/0", rec.Retries, rec.Nacks, rec.Acks)
 	}
+	if rec.LastRetryReason != "get: status 429 (rate limited)" {
+		t.Errorf("LastRetryReason=%q — x-last-error (CLAUDE.md §8) должен нести текст ошибки Fetch, у неё нет pipeline_events", rec.LastRetryReason)
+	}
 }
 
 func TestConsumer_PermanentError_GoesStraightToDLQ(t *testing.T) {
@@ -157,8 +160,9 @@ func TestConsumer_PermanentError_GoesStraightToDLQ(t *testing.T) {
 	perm := errors.Join(shareddomain.ErrPermanent, errors.New("status 403"))
 	rec := run(t, body, &fakeSvc{err: perm}, nil)
 
-	if len(rec.Nacks) != 1 || rec.Nacks[0] != false || rec.Retries != 0 {
-		t.Errorf("nacks=%v retries=%d, want [false]/0 — 403 повтором не лечится, три круга ожидания впустую", rec.Nacks, rec.Retries)
+	// DeadLetter (не Nack — тот не даёт приложить x-last-error), retry-ступени пропускаются.
+	if rec.DeadLetters != 1 || rec.Retries != 0 || len(rec.Nacks) != 0 {
+		t.Errorf("deadLetters=%d retries=%d nacks=%v, want 1/0/[] — 403 повтором не лечится, три круга ожидания впустую", rec.DeadLetters, rec.Retries, rec.Nacks)
 	}
 }
 

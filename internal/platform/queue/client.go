@@ -30,8 +30,9 @@ type Client interface {
 	QueueLength(ctx context.Context, queue string) (int, error)
 }
 
-// Delivery — минимальный контракт одного сообщения; Ack/Nack/Retry — обязаны
-// вызываться явно (manual ack), auto-ack не используется нигде в проекте.
+// Delivery — минимальный контракт одного сообщения; Ack/Nack/Retry/
+// DeadLetter — обязаны вызываться явно (manual ack), auto-ack не
+// используется нигде в проекте.
 type Delivery struct {
 	Body []byte
 	Ack  func() error
@@ -43,7 +44,18 @@ type Delivery struct {
 	// requeue при недоступной зависимости — busy-loop, тот самый
 	// антипаттерн из ТЕОРИЯ-УГЛУБЛЁННО.md §2.6. Сам подтверждает (ack)
 	// исходное сообщение — вызывающий после Retry больше ничего не делает.
-	Retry func(ctx context.Context) error
+	// reason — текст ошибки, попадает в заголовок x-last-error (retry.go)
+	// следующей копии сообщения.
+	Retry func(ctx context.Context, reason string) error
+
+	// DeadLetter — постоянный сбой: ручная публикация копии сообщения (с
+	// заголовком x-last-error) в DLX стадии + Ack оригинала. НЕ Nack(false)
+	// — тот отдаёт dead-letter нативному механизму RabbitMQ, который копирует
+	// заголовки как есть, но не даёт приложить новый (CLAUDE.md §8,
+	// internal/platform/queue — инфра-механизм, симметричный
+	// pipeline_events для стадий, у которых его нет, в первую очередь Fetch,
+	// MODEL §1.5bis). Сам подтверждает (ack) исходное сообщение.
+	DeadLetter func(ctx context.Context, reason string) error
 }
 
 // ErrDeliveriesClosed — канал доставок закрылся, а ctx жив: оборвалось
@@ -53,13 +65,21 @@ type Delivery struct {
 var ErrDeliveriesClosed = errors.New("queue: deliveries channel closed while context still alive")
 
 // Fail — единая реакция consumer'а на ошибку обработки: постоянная (retry не
-// поможет) — сразу в DLQ (Nack без requeue), иначе — backoff через Retry.
-func (d Delivery) Fail(ctx context.Context, permanent bool) {
+// поможет) — сразу в DLQ (DeadLetter, не Nack — несёт reason), иначе —
+// backoff через Retry. reason — err.Error() вызывающего, попадает в
+// x-last-error на итоговом сообщении в любом случае.
+func (d Delivery) Fail(ctx context.Context, permanent bool, reason string) {
 	if permanent {
-		_ = d.Nack(false)
+		if err := d.DeadLetter(ctx, reason); err != nil {
+			// Запасной путь — нативный DLX всё равно сработает через
+			// Nack(false), просто без x-last-error на этот раз (тот же
+			// принцип "деградирует отдельно", что у best-effort метрик,
+			// CLAUDE.md §10.5) — не оставляем сообщение неподтверждённым.
+			_ = d.Nack(false)
+		}
 		return
 	}
-	d.RetryLater(ctx)
+	d.RetryLater(ctx, reason)
 }
 
 // RetryLater — Retry с последним рубежом: если сам retry-механизм
@@ -67,8 +87,8 @@ func (d Delivery) Fail(ctx context.Context, permanent bool) {
 // возвращается через Nack(requeue=true), а не остаётся висеть
 // неподтверждённым до разрыва канала. Это тот самый мгновенный requeue, но
 // только при отказе самого retry-контура — не штатный путь обработки сбоев.
-func (d Delivery) RetryLater(ctx context.Context) {
-	if err := d.Retry(ctx); err != nil {
+func (d Delivery) RetryLater(ctx context.Context, reason string) {
+	if err := d.Retry(ctx, reason); err != nil {
 		_ = d.Nack(true)
 	}
 }

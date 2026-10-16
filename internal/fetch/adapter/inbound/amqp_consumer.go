@@ -47,7 +47,7 @@ func (c *AMQPConsumer) Run(ctx context.Context) error {
 			// 429/5xx/сеть/нет прокси — backoff 1/2/4 мин; прочие 4xx
 			// (ErrPermanent) — сразу в fetch.dlq.
 			c.recorder.IncProcessed("fetch", "error")
-			d.Fail(ctx, shareddomain.IsPermanent(err))
+			d.Fail(ctx, shareddomain.IsPermanent(err), err.Error())
 			continue
 		}
 		c.recorder.IncProcessed("fetch", "done")

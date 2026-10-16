@@ -30,7 +30,13 @@ the gotchas section below.
   Correctly absent from MODEL-buildscrape.md — retry/DLQ are RabbitMQ
   infrastructure, not a domain Entity/Gate (same reasoning as §1.5bis for
   metrics), unlike the other three gaps below where the model really was
-  missing something.
+  missing something. Extended 2026-10-16 ("DLQ-причина для Fetch", CLAUDE.md
+  "Готово"): after `Retry`, reads the republished message back via the
+  RabbitMQ Management API (`peekLastErrorHeader`, `POST .../get` with
+  `ack_requeue_true` so the queue length isn't disturbed) and asserts its
+  `x-last-error` header equals the reason string passed to `Retry` —
+  confirms the header actually reaches a real broker message, not just
+  the fake `queue.Client` in unit tests.
 - `TestParseUpsert_BlockedRefetchDoesNotClobberGoodContent` (E2E-4) — the
   `CASE` in `item_repo.go`'s upsert (MODEL-buildscrape.md §1.3 "Важное
   исправление", C10/P7): a stale refetch that lands on a CAPTCHA/stub page

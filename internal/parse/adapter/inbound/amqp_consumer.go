@@ -44,7 +44,7 @@ func (c *AMQPConsumer) Run(ctx context.Context) error {
 			// Невалидная карточка (ErrPermanent) — сразу в DLQ; всё остальное
 			// (БД недоступна и т.п.) — backoff 1/2/4 мин, после
 			// MaxRetryAttempts — тоже в DLQ (queue.Delivery.Fail).
-			d.Fail(ctx, shareddomain.IsPermanent(err))
+			d.Fail(ctx, shareddomain.IsPermanent(err), err.Error())
 			continue
 		}
 		_ = d.Ack()

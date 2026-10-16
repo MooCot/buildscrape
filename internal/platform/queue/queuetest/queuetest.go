@@ -13,13 +13,22 @@ import (
 
 // Recorder — что consumer сделал с ОДНИМ сообщением.
 type Recorder struct {
-	Acks    int
-	Nacks   []bool // requeue-флаг каждого вызова Nack, по порядку
-	Retries int
+	Acks        int
+	Nacks       []bool // requeue-флаг каждого вызова Nack, по порядку
+	Retries     int
+	DeadLetters int
 
-	// RetryErr — что вернёт Retry (имитация недоступного retry-механизма:
-	// например, публикация в wait-очередь не подтверждена брокером).
-	RetryErr error
+	// LastRetryReason/LastDeadLetterReason — reason последнего вызова
+	// (x-last-error, CLAUDE.md §8/retry.go) — тесты, которым важен именно
+	// текст причины, не только факт вызова.
+	LastRetryReason      string
+	LastDeadLetterReason string
+
+	// RetryErr/DeadLetterErr — что вернёт Retry/DeadLetter (имитация
+	// недоступного механизма: публикация в wait-очередь/DLX не
+	// подтверждена брокером).
+	RetryErr      error
+	DeadLetterErr error
 }
 
 // NewDelivery — сообщение с body и Recorder, в который пишутся действия.
@@ -29,9 +38,15 @@ func NewDelivery(body []byte) (queue.Delivery, *Recorder) {
 		Body: body,
 		Ack:  func() error { r.Acks++; return nil },
 		Nack: func(requeue bool) error { r.Nacks = append(r.Nacks, requeue); return nil },
-		Retry: func(ctx context.Context) error {
+		Retry: func(ctx context.Context, reason string) error {
 			r.Retries++
+			r.LastRetryReason = reason
 			return r.RetryErr
+		},
+		DeadLetter: func(ctx context.Context, reason string) error {
+			r.DeadLetters++
+			r.LastDeadLetterReason = reason
+			return r.DeadLetterErr
 		},
 	}, r
 }

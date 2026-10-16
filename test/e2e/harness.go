@@ -67,7 +67,7 @@ func setupPostgres(t *testing.T) db.Pool {
 // (`rabbitmq:3.13-management`), с ПОЛНОЙ топологией (`queue.Topology`,
 // amqp_client.go `Declare`) — то же самое, что composition root делает
 // при старте каждой роли, не урезанный тестовый стенд.
-func setupRabbitMQ(t *testing.T) queue.Client {
+func setupRabbitMQ(t *testing.T) (queue.Client, *rabbitmq.RabbitMQContainer) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -123,7 +123,7 @@ func setupRabbitMQ(t *testing.T) queue.Client {
 	if err := client.Declare(queue.Topology); err != nil {
 		t.Fatalf("declare topology: %v", err)
 	}
-	return client
+	return client, ctr
 }
 
 // applyMigrations — те же файлы, что docker-entrypoint-initdb.d монтирует

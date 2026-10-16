@@ -116,8 +116,9 @@ func TestConsumer_InvalidListing_GoesStraightToDLQ(t *testing.T) {
 
 	// Невалидная карточка (CLAUDE.md §3.2) — в parse.dlq сразу, а не через
 	// три круга ожидания (1+2+4 мин) ради заведомо того же результата.
-	if len(rec.Nacks) != 1 || rec.Nacks[0] != false || rec.Retries != 0 {
-		t.Errorf("nacks=%v retries=%d, want [false]/0", rec.Nacks, rec.Retries)
+	// DeadLetter, не Nack — тот не даёт приложить x-last-error.
+	if rec.DeadLetters != 1 || rec.Retries != 0 || len(rec.Nacks) != 0 {
+		t.Errorf("deadLetters=%d retries=%d nacks=%v, want 1/0/[]", rec.DeadLetters, rec.Retries, rec.Nacks)
 	}
 }
 

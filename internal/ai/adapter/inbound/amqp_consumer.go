@@ -41,7 +41,7 @@ func (c *AMQPConsumer) Run(ctx context.Context) error {
 			// (breaker сам восстановится, ТЕОРИЯ-УГЛУБЛЁННО.md §8.1) →
 			// backoff через wait-очередь, не DLQ сразу и не мгновенный
 			// requeue (пока breaker открыт, тот крутился бы вхолостую).
-			d.Fail(ctx, shareddomain.IsPermanent(err))
+			d.Fail(ctx, shareddomain.IsPermanent(err), err.Error())
 			continue
 		}
 		_ = d.Ack()

@@ -108,7 +108,7 @@ func (c *AMQPClient) declareStage(s StageSpec) error {
 	args := amqp.Table{}
 
 	if s.DLX {
-		dlx := s.Exchange + ".dlx"
+		dlx := DLXName(s.Exchange)
 		dlq := DLQName(s.Queue)
 
 		if err := c.ch.ExchangeDeclare(dlx, "fanout", true, false, false, false, nil); err != nil {
@@ -181,19 +181,43 @@ func (c *AMQPClient) publish(ctx context.Context, exchange, routingKey string, m
 // оригинала": при падении между шагами сообщение обработается дважды
 // (at-least-once), что допустимо — consumer'ы идемпотентны (ON CONFLICT
 // upsert, ТЕОРИЯ-УГЛУБЛЁННО.md §6.2); обратный порядок терял бы сообщение.
-func (c *AMQPClient) retry(ctx context.Context, queue string, d amqp.Delivery) error {
+// reason попадает в x-last-error каждой republish-копии — к моменту
+// исчерпания попыток deadLetter использует СВЕЖИЙ reason, переданный сюда
+// именно сейчас, не унаследованный от предыдущей ступени.
+func (c *AMQPClient) retry(ctx context.Context, exchange, queue string, d amqp.Delivery, reason string) error {
 	next, exhausted := planRetry(attemptFromHeaders(d.Headers))
 	if exhausted {
-		// Nack без requeue → x-dead-letter-exchange основной очереди → DLQ.
-		return d.Nack(false, false)
+		return c.deadLetter(ctx, exchange, d, reason)
 	}
 	err := c.publish(ctx, "", RetryQueueName(queue, next), amqp.Publishing{
 		ContentType:  d.ContentType,
 		DeliveryMode: amqp.Persistent,
-		Headers:      amqp.Table{attemptHeader: int32(next)},
+		Headers:      amqp.Table{attemptHeader: int32(next), lastErrorHeader: reason},
 		Body:         d.Body,
 	})
 	if err != nil {
+		return err
+	}
+	return d.Ack(false)
+}
+
+// deadLetter — см. Delivery.DeadLetter. Ручная публикация в DLX стадии
+// (не Nack(false), тот не даёт приложить заголовок, CLAUDE.md §8) —
+// заголовки оригинала (включая x-attempt, если сообщение уже прошло
+// retry-ступени) сохраняются, x-last-error добавляется/перезаписывается
+// свежим значением.
+func (c *AMQPClient) deadLetter(ctx context.Context, exchange string, d amqp.Delivery, reason string) error {
+	hdrs := amqp.Table{}
+	for k, v := range d.Headers {
+		hdrs[k] = v
+	}
+	hdrs[lastErrorHeader] = reason
+	if err := c.publish(ctx, DLXName(exchange), "", amqp.Publishing{
+		ContentType:  d.ContentType,
+		DeliveryMode: amqp.Persistent,
+		Headers:      hdrs,
+		Body:         d.Body,
+	}); err != nil {
 		return err
 	}
 	return d.Ack(false)
@@ -211,6 +235,9 @@ func (c *AMQPClient) Consume(ctx context.Context, queue string, prefetch int) (<
 	if err != nil {
 		return nil, fmt.Errorf("consume %s: %w", queue, err)
 	}
+	// exchange своей стадии — нужен DeadLetter/Retry для DLXName (deadLetter),
+	// не самой очереди; ищется раз на весь Consume, не на каждую доставку.
+	exchange := exchangeForQueue(queue)
 
 	out := make(chan Delivery)
 	go func() {
@@ -226,10 +253,15 @@ func (c *AMQPClient) Consume(ctx context.Context, queue string, prefetch int) (<
 				delivery := d // отдельная переменная на итерацию — захват в замыканиях Ack/Nack ниже
 				select {
 				case out <- Delivery{
-					Body:  delivery.Body,
-					Ack:   func() error { return delivery.Ack(false) }, // multiple=false — только это сообщение
-					Nack:  func(requeue bool) error { return delivery.Nack(false, requeue) },
-					Retry: func(ctx context.Context) error { return c.retry(ctx, queue, delivery) },
+					Body: delivery.Body,
+					Ack:  func() error { return delivery.Ack(false) }, // multiple=false — только это сообщение
+					Nack: func(requeue bool) error { return delivery.Nack(false, requeue) },
+					Retry: func(ctx context.Context, reason string) error {
+						return c.retry(ctx, exchange, queue, delivery, reason)
+					},
+					DeadLetter: func(ctx context.Context, reason string) error {
+						return c.deadLetter(ctx, exchange, delivery, reason)
+					},
 				}:
 				case <-ctx.Done():
 					return
@@ -238,4 +270,17 @@ func (c *AMQPClient) Consume(ctx context.Context, queue string, prefetch int) (<
 		}
 	}()
 	return out, nil
+}
+
+// exchangeForQueue — обратный поиск по Topology (CLAUDE.md §4.3): Consume
+// получает только имя очереди, а DeadLetter/Retry нужен exchange стадии
+// для DLXName. Не новый хардкод — тот же реестр, что Declare уже
+// использует при старте.
+func exchangeForQueue(queue string) string {
+	for _, s := range Topology {
+		if s.Queue == queue {
+			return s.Exchange
+		}
+	}
+	return ""
 }
