@@ -10,8 +10,12 @@ test-unit:
 
 # Интеграционные — test/e2e/, testcontainers, реальные Postgres/RabbitMQ.
 # Осознанно отдельная, медленная команда — не часть test-unit.
+# TESTCONTAINERS_RYUK_DISABLED: ryuk (служебный reaper-контейнер
+# testcontainers для автоочистки) не стартует на Docker Desktop/Windows в
+# этом проекте (named-pipe таймаут) — не критично локально, т.к. каждый
+# тест сам завершает свой контейнер через t.Cleanup(ctr.Terminate).
 test-e2e:
-	go test ./test/e2e/... -race -tags=e2e
+	TESTCONTAINERS_RYUK_DISABLED=true go test ./test/e2e/... -race -tags=e2e
 
 test: test-unit test-e2e
 

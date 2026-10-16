@@ -1,0 +1,81 @@
+//go:build e2e
+
+// Package e2e — тесты на testcontainers (CLAUDE.md "Не сделано" →
+// MODEL-buildscrape.md §10 TDD-порядок, подмножество: только то, что fake-
+// порты не воспроизводят — ON CONFLICT под реальным Postgres, реальная
+// доставка AMQP). Build tag `e2e` держит их вне `go test ./...`/`make
+// test-unit` — отдельная, медленная команда `make test-e2e`, требует
+// Docker (testcontainers поднимает его сам, не docker-compose).
+package e2e
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"buildscrape/internal/platform/db"
+
+	"github.com/testcontainers/testcontainers-go/modules/postgres"
+)
+
+// setupPostgres — реальный Postgres 16.4 (та же версия, что
+// deployments/docker-compose.yml) в контейнере + применённые миграции
+// (`migrations/*.sql`, тот же порядок по имени, что
+// docker-entrypoint-initdb.d использует в compose). Контейнер
+// останавливается автоматически в конце теста (t.Cleanup).
+func setupPostgres(t *testing.T) db.Pool {
+	t.Helper()
+	ctx := context.Background()
+
+	ctr, err := postgres.Run(ctx, "postgres:16.4",
+		postgres.WithDatabase("buildscrape"),
+		postgres.WithUsername("buildscrape"),
+		postgres.WithPassword("buildscrape"),
+		postgres.BasicWaitStrategies(),
+	)
+	if err != nil {
+		t.Fatalf("start postgres container: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := ctr.Terminate(ctx); err != nil {
+			t.Logf("terminate postgres container: %v", err)
+		}
+	})
+
+	dsn, err := ctr.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		t.Fatalf("connection string: %v", err)
+	}
+
+	pool, err := db.NewPgxPool(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	applyMigrations(t, ctx, pool)
+	return pool
+}
+
+// applyMigrations — те же файлы, что docker-entrypoint-initdb.d монтирует
+// в проде (deployments/docker-compose.yml), по алфавиту, одним Exec на
+// файл. Не DDL-инструмент на будущее — ровно то, что нужно тестовому
+// контейнеру с пустым томом, см. migrations/README-подобный комментарий в
+// самом docker-compose.yml.
+func applyMigrations(t *testing.T, ctx context.Context, pool db.Pool) {
+	t.Helper()
+	files, err := filepath.Glob("../../migrations/*.sql")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("glob migrations: %v (files=%v)", err, files)
+	}
+	for _, f := range files {
+		sql, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", f, err)
+		}
+		if _, err := pool.Exec(ctx, string(sql)); err != nil {
+			t.Fatalf("apply migration %s: %v", f, err)
+		}
+	}
+}
