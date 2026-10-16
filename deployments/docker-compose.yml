@@ -72,6 +72,14 @@ services:
     image: grafana/grafana:11.2.0
     depends_on:
       - prometheus
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true" # демо — смотреть дашборд без логина
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
 
   # Демо-источник (CLAUDE.md §2): фейковые объявления с 429/503/CAPTCHA.
   # Регистрация как Source: см. README, "Запуск демо".

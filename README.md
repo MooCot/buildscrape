@@ -37,6 +37,13 @@ Queues, retry stages and the DLQ — in the RabbitMQ management UI: http://local
 (`buildscrape` / `buildscrape`). Scaling: `docker compose -f
 deployments/docker-compose.yml up --scale worker-fetch=10`.
 
+Metrics — Prometheus-backed (`buildscrape_items_processed_total`,
+`buildscrape_stage_duration_seconds`, `buildscrape_queue_length`), scraped
+from `serve` and every `worker <stage>` except `cleanup`. A "buildscrape
+pipeline" dashboard (throughput by stage/status, p50/p95 latency, queue
+depth) is provisioned automatically — open http://localhost:3000
+(anonymous viewer access, no login needed for this demo).
+
 Without Docker (roles start on `Noop` DB/queue stubs if
 `POSTGRES_DSN`/`RABBITMQ_URL` are unset):
 
@@ -88,7 +95,7 @@ internal/platform/         infrastructure wrappers (queue/db/config/observabilit
 internal/core/             immutable core — constants + append-only pipeline version registry
 internal/mocksource/       demo data source (a fixture, not a pipeline role)
 migrations/                SQL schema
-deployments/               Dockerfile + docker-compose + prometheus.yml
+deployments/               Dockerfile + docker-compose + prometheus.yml + grafana/ (datasource + dashboard provisioning)
 test/inprocess/            end-to-end tests without infrastructure
 test/e2e/                  integration tests (testcontainers), still empty
 ```
