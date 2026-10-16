@@ -22,10 +22,28 @@ container via `t.Cleanup`.
   worker-fetch=N`), MODEL-buildscrape.md §1.1bis, C9/P6 — the model is the
   source of truth here (added 2026-10-16, this invariant used to live only
   in CLAUDE.md/code comments).
+- `TestRetryLadder_DeadLetterReturnsMessageToMainQueue` — the
+  `x-dead-letter-exchange: ""` requeue trick (CLAUDE.md:152, retry.go);
+  real RabbitMQ container, real 1-minute TTL on `fetch.queue.retry.1` —
+  slow (~90-110s including container boot), deliberately not scoped to
+  `make test-unit`. Correctly absent from MODEL-buildscrape.md — retry/DLQ
+  are RabbitMQ infrastructure, not a domain Entity/Gate (same reasoning as
+  §1.5bis for metrics), unlike `ClaimDue` above where the gap was real.
 
 **Candidates not yet written** (CLAUDE.md "Не сделано" — named risks that
-only a real broker/DB can confirm): the retry ladder's
-`x-dead-letter-exchange: ""` requeue trick, the Parse-upsert `CASE` not
-clobbering an already-`blocked_reason` row, the FK on
-`pipeline_events.item_id` (MODEL §1.5bis), circuit breaker state surviving
-a process restart.
+only a real broker/DB can confirm): the Parse-upsert `CASE` not clobbering
+an already-`blocked_reason` row, the FK on `pipeline_events.item_id`
+(MODEL §1.5bis), circuit breaker state surviving a process restart.
+
+**testcontainers-go rabbitmq module gotchas (v0.33.0), both worked around
+in `harness.go`:**
+- `testcontainers.WithWaitStrategy(...)` hardcodes a 60s deadline
+  regardless of the strategy's own `WithStartupTimeout` — use
+  `WithWaitStrategyAndDeadline(deadline, strategy)` to actually extend it.
+  Needed here: this machine's RabbitMQ boot is slow (~30-55s), observed
+  earlier this session with the real docker-compose stack too.
+- `rabbitmq.WithAdminUsername/WithAdminPassword` write `default_user`/
+  `default_pass` into the config file, but `Run()` also hardcodes
+  `RABBITMQ_DEFAULT_USER/PASS=guest` in the container env — in practice
+  `guest`/`guest` wins. Don't fight it; the test doesn't care about
+  credentials.

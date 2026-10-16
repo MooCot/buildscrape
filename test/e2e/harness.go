@@ -13,10 +13,15 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"buildscrape/internal/platform/db"
+	"buildscrape/internal/platform/queue"
 
+	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
+	"github.com/testcontainers/testcontainers-go/modules/rabbitmq"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // setupPostgres — реальный Postgres 16.4 (та же версия, что
@@ -56,6 +61,59 @@ func setupPostgres(t *testing.T) db.Pool {
 
 	applyMigrations(t, ctx, pool)
 	return pool
+}
+
+// setupRabbitMQ — тот же образ/версия, что deployments/docker-compose.yml
+// (`rabbitmq:3.13-management`), с ПОЛНОЙ топологией (`queue.Topology`,
+// amqp_client.go `Declare`) — то же самое, что composition root делает
+// при старте каждой роли, не урезанный тестовый стенд.
+func setupRabbitMQ(t *testing.T) queue.Client {
+	t.Helper()
+	ctx := context.Background()
+
+	// Дедлайн 2 мин, не дефолтные 60с — на этой машине RabbitMQ стабильно
+	// грузится дольше минуты даже в одиночном контейнере (та же
+	// особенность, что уже наблюдалась при живом docker compose up в этой
+	// сессии — ~54с без конкурентной нагрузки, здесь выходит за дефолт).
+	// WithWaitStrategy (не AndDeadline) хардкодит 60с дедлайн СВЕРХУ любой
+	// переданной стратегии (options.go:314 этой же библиотеки) — поэтому
+	// именно AndDeadline, не WithStartupTimeout на самой wait.Strategy.
+	// WithAdminUsername/Password НЕ используются намеренно: модуль
+	// одновременно хардкодит RABBITMQ_DEFAULT_USER/PASS=guest в Env (до
+	// применения опций, rabbitmq.go Run()) И пишет default_user/default_pass
+	// в конфиг-файл из этих опций — на практике выигрывает guest/guest
+	// (конфликт самого модуля, не этого теста); guest/guest достаточно,
+	// тест про механику retry/DLQ, не про credentials.
+	ctr, err := rabbitmq.Run(ctx, "rabbitmq:3.13-management",
+		testcontainers.WithWaitStrategyAndDeadline(
+			2*time.Minute,
+			wait.ForLog("Server startup complete"),
+		),
+	)
+	if err != nil {
+		t.Fatalf("start rabbitmq container: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := ctr.Terminate(ctx); err != nil {
+			t.Logf("terminate rabbitmq container: %v", err)
+		}
+	})
+
+	url, err := ctr.AmqpURL(ctx)
+	if err != nil {
+		t.Fatalf("amqp url: %v", err)
+	}
+
+	client, err := queue.Dial(url)
+	if err != nil {
+		t.Fatalf("dial rabbitmq: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	if err := client.Declare(queue.Topology); err != nil {
+		t.Fatalf("declare topology: %v", err)
+	}
+	return client
 }
 
 // applyMigrations — те же файлы, что docker-entrypoint-initdb.d монтирует
