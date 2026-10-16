@@ -71,10 +71,14 @@ func setupRabbitMQ(t *testing.T) queue.Client {
 	t.Helper()
 	ctx := context.Background()
 
-	// Дедлайн 2 мин, не дефолтные 60с — на этой машине RabbitMQ грузится
-	// нестабильно (один прогон ~27с, следующий >60с). ДВА независимых
-	// таймаута нужно поднять, не один — поднятие только одного из них всё
-	// равно даёт эффективный потолок 60с, именно так тест и падал:
+	// Дедлайн 3 мин, не дефолтные 60с — на этой машине RabbitMQ грузится
+	// очень нестабильно (наблюдались живые прогоны от ~27с до
+	// "Time to start RabbitMQ: 122062 ms" в логе самого брокера, то есть
+	// 2-минутный дедлайн, поставленный раньше, тоже не всегда хватает —
+	// 3 минуты как запас сверху худшего наблюдённого случая, не точное
+	// значение). ДВА независимых таймаута нужно поднять, не один —
+	// поднятие только одного из них всё равно даёт эффективный потолок
+	// меньшей из двух величин, именно так тест и падал:
 	//  1. LogStrategy.timeout (wait/log.go) — если не задан явно через
 	//     .WithStartupTimeout на САМОЙ стратегии (а не снаружи), внутри
 	//     WaitUntilReady используется defaultStartupTimeout()=60с через
@@ -92,8 +96,8 @@ func setupRabbitMQ(t *testing.T) queue.Client {
 	// тест про механику retry/DLQ, не про credentials.
 	ctr, err := rabbitmq.Run(ctx, "rabbitmq:3.13-management",
 		testcontainers.WithWaitStrategyAndDeadline(
-			2*time.Minute,
-			wait.ForLog("Server startup complete").WithStartupTimeout(2*time.Minute),
+			3*time.Minute,
+			wait.ForLog("Server startup complete").WithStartupTimeout(3*time.Minute),
 		),
 	)
 	if err != nil {
