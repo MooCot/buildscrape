@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"buildscrape/internal/platform/observability"
 	"buildscrape/internal/platform/queue"
 	"buildscrape/internal/platform/queue/queuetest"
 	shared "buildscrape/internal/shared/contracts"
@@ -105,7 +106,7 @@ func run(t *testing.T, body []byte, svc *fakeSvc, retryErr error) *queuetest.Rec
 	t.Helper()
 	d, rec := queuetest.NewDelivery(body)
 	rec.RetryErr = retryErr
-	c := NewAMQPConsumer(&queuetest.Client{Deliveries: []queue.Delivery{d}}, svc)
+	c := NewAMQPConsumer(&queuetest.Client{Deliveries: []queue.Delivery{d}}, svc, observability.NewNoopRecorder())
 	if err := c.Run(context.Background()); !errors.Is(err, queue.ErrDeliveriesClosed) {
 		t.Fatalf("Run: %v, want ErrDeliveriesClosed", err)
 	}
@@ -166,7 +167,7 @@ func TestConsumer_ContextCancelReturnsCtxErrNotDeliveriesClosed(t *testing.T) {
 	// первое не должно выглядеть как авария.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	c := NewAMQPConsumer(&queuetest.Client{}, &fakeSvc{})
+	c := NewAMQPConsumer(&queuetest.Client{}, &fakeSvc{}, observability.NewNoopRecorder())
 	if err := c.Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Errorf("Run=%v, want context.Canceled", err)
 	}

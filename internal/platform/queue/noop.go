@@ -23,3 +23,7 @@ func (c *NoopClient) Consume(ctx context.Context, queue string, prefetch int) (<
 	}()
 	return ch, nil
 }
+
+func (c *NoopClient) QueueLength(ctx context.Context, queue string) (int, error) {
+	return 0, nil
+}

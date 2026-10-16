@@ -23,6 +23,11 @@ import (
 type Client interface {
 	Publish(ctx context.Context, exchange, routingKey string, body []byte) error
 	Consume(ctx context.Context, queue string, prefetch int) (<-chan Delivery, error)
+
+	// QueueLength — текущая глубина очереди, без побочных эффектов
+	// (MODEL-buildscrape.md F11/§1.5bis — П-metrics, CLAUDE.md §10.3).
+	// Не публикует, не консьюмит, не меняет очередь.
+	QueueLength(ctx context.Context, queue string) (int, error)
 }
 
 // Delivery — минимальный контракт одного сообщения; Ack/Nack/Retry — обязаны

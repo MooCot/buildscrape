@@ -52,8 +52,18 @@ func retryDelay(attempt int) time.Duration {
 	return core.RetryBaseDelay << (attempt - 1)
 }
 
-func retryQueueName(mainQueue string, attempt int) string {
+// RetryQueueName — экспортирована (CLAUDE.md §10.3): F11 (опрос длины
+// очередей, MODEL-buildscrape.md) перебирает retry-ступени каждой стадии
+// и не должен отдельной копией повторять эту строковую формулу.
+func RetryQueueName(mainQueue string, attempt int) string {
 	return fmt.Sprintf("%s.retry.%d", mainQueue, attempt)
+}
+
+// DLQName — тот же случай: вынесено из inline-логики внутри declareStage,
+// чтобы имя DLQ не вычислялось дважды двумя разными строковыми операциями
+// в двух местах пакета.
+func DLQName(mainQueue string) string {
+	return mainQueue[:len(mainQueue)-len(".queue")] + ".dlq"
 }
 
 // retryQueueArgs — аргументы wait-очереди одной ступени. Сообщение живёт в

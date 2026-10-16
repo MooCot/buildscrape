@@ -7,6 +7,7 @@ import (
 
 	"buildscrape/internal/core"
 	"buildscrape/internal/platform/db"
+	"buildscrape/internal/platform/observability"
 	"buildscrape/internal/platform/queue"
 	shared "buildscrape/internal/shared/contracts"
 
@@ -22,14 +23,18 @@ import (
 // привязанной очереди молча роняет сообщения (никто её не слушал). Правка
 // MODEL §1.5/§9 (2026-10-16): INSERT в pipeline_events — обязательная,
 // синхронная часть результата стадии; публикация в pipeline.events для
-// живого дашборда — best-effort рядом, не вместо.
+// живого дашборда — best-effort рядом, не вместо. Третья обязанность
+// (добавлена тем же днём, CLAUDE.md §10.2) — IncProcessed(stage, status) в
+// той же точке, тем же (stage, status), что уже идёт в журнал: один call
+// site, метрика и журнал не могут разойтись.
 type EventRecorder struct {
-	pool db.Pool
-	conn queue.Client
+	pool     db.Pool
+	conn     queue.Client
+	recorder observability.Recorder
 }
 
-func NewEventRecorder(pool db.Pool, conn queue.Client) *EventRecorder {
-	return &EventRecorder{pool: pool, conn: conn}
+func NewEventRecorder(pool db.Pool, conn queue.Client, recorder observability.Recorder) *EventRecorder {
+	return &EventRecorder{pool: pool, conn: conn, recorder: recorder}
 }
 
 func (r *EventRecorder) PublishStageEvent(ctx context.Context, itemID uuid.UUID, stage, status, errMsg string) error {
@@ -42,6 +47,7 @@ func (r *EventRecorder) PublishStageEvent(ctx context.Context, itemID uuid.UUID,
 	`, itemID, stage, status, errArg); err != nil {
 		return err // журнал обязателен (MODEL §1.5) — ошибка здесь = ошибка всей стадии, не глушится
 	}
+	r.recorder.IncProcessed(stage, status)
 
 	body, err := json.Marshal(shared.ItemProcessedEvent{
 		Envelope: shared.Envelope{ItemID: itemID, PipelineVersion: core.CurrentPipelineVersion},

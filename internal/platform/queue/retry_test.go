@@ -81,8 +81,34 @@ func TestRetryQueueArgs_DeadLettersBackToMainQueueViaDefaultExchange(t *testing.
 }
 
 func TestRetryQueueName(t *testing.T) {
-	if got := retryQueueName("ai.queue", 3); got != "ai.queue.retry.3" {
+	if got := RetryQueueName("ai.queue", 3); got != "ai.queue.retry.3" {
 		t.Errorf("got %q", got)
+	}
+}
+
+func TestDLQName(t *testing.T) {
+	if got := DLQName("ai.queue"); got != "ai.dlq" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// AllQueueNames — F11/П-metrics перебирает ровно этот список, не строит
+// свой: 5 стадий × (1 основная + 3 retry + 1 DLQ) = 25 (CLAUDE.md §10.1).
+func TestAllQueueNames(t *testing.T) {
+	names := AllQueueNames(Topology)
+	if len(names) != len(Topology)*5 {
+		t.Fatalf("got %d names, want %d (5 per stage)", len(names), len(Topology)*5)
+	}
+	seen := map[string]bool{}
+	for _, n := range names {
+		seen[n] = true
+	}
+	for _, want := range []string{
+		"ai.queue", "ai.queue.retry.1", "ai.queue.retry.2", "ai.queue.retry.3", "ai.dlq",
+	} {
+		if !seen[want] {
+			t.Errorf("missing %q in AllQueueNames result: %v", want, names)
+		}
 	}
 }
 

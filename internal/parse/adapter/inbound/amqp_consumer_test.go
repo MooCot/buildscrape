@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"testing"
 
+	"buildscrape/internal/platform/observability"
 	"buildscrape/internal/platform/queue"
 	"buildscrape/internal/platform/queue/queuetest"
 	shared "buildscrape/internal/shared/contracts"
@@ -36,7 +37,7 @@ func run(t *testing.T, body []byte, svc *fakeSvc, retryErr error) *queuetest.Rec
 	t.Helper()
 	d, rec := queuetest.NewDelivery(body)
 	rec.RetryErr = retryErr
-	c := NewAMQPConsumer(&queuetest.Client{Deliveries: []queue.Delivery{d}}, svc)
+	c := NewAMQPConsumer(&queuetest.Client{Deliveries: []queue.Delivery{d}}, svc, observability.NewNoopRecorder())
 	// queuetest.Client закрывает канал после подготовленных сообщений при
 	// живом ctx — для consumer'а это "оборвалось соединение": он обязан
 	// вернуть ErrDeliveriesClosed, а не nil (иначе воркер вышел бы с кодом 0).

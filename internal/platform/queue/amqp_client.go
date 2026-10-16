@@ -19,8 +19,9 @@ import (
 // consumer, TODO на будущий инкремент, не спроектировано здесь заранее
 // вхолостую.
 type AMQPClient struct {
-	conn *amqp.Connection
-	ch   *amqp.Channel
+	conn      *amqp.Connection
+	ch        *amqp.Channel
+	metricsCh *amqp.Channel // отдельный канал под QueueLength, см. его doc-comment
 }
 
 // Dial — открывает соединение + канал. Не ретраит и не скрывает ошибку —
@@ -46,16 +47,43 @@ func Dial(url string) (*AMQPClient, error) {
 		_ = conn.Close()
 		return nil, fmt.Errorf("amqp confirm mode: %w", err)
 	}
-	return &AMQPClient{conn: conn, ch: ch}, nil
+	metricsCh, err := conn.Channel()
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("amqp metrics channel: %w", err)
+	}
+	return &AMQPClient{conn: conn, ch: ch, metricsCh: metricsCh}, nil
 }
 
 func (c *AMQPClient) Close() error {
 	chErr := c.ch.Close()
+	metricsChErr := c.metricsCh.Close()
 	connErr := c.conn.Close()
 	if chErr != nil {
 		return chErr
 	}
+	if metricsChErr != nil {
+		return metricsChErr
+	}
 	return connErr
+}
+
+// QueueLength — текущая глубина очереди (MODEL-buildscrape.md F11,
+// CLAUDE.md §10.3), без побочных эффектов на саму очередь. Собственный
+// канал (metricsCh), не c.ch: QueueDeclarePassive на несуществующую очередь
+// закрывает канал целиком (AMQP 0-9-1) — на том же канале, что
+// Publish/Consume, редкая гонка на опросе уронила бы publish-путь всей
+// роли вместе с ним. Закрытый metricsCh после такой ошибки НЕ
+// переоткрывается этим инкрементом — все следующие вызовы будут возвращать
+// ошибку до рестарта процесса; это обзорная observability-ветка, не
+// основной путь данных, поэтому деградирует отдельно и не тащит за собой
+// остальное (см. best-effort трактовку метрик, CLAUDE.md §10.5).
+func (c *AMQPClient) QueueLength(ctx context.Context, name string) (int, error) {
+	q, err := c.metricsCh.QueueDeclarePassive(name, true, false, false, false, nil)
+	if err != nil {
+		return 0, fmt.Errorf("queue length %s: %w", name, err)
+	}
+	return q.Messages, nil
 }
 
 // Declare — идемпотентно объявляет ВСЮ топологию (exchange/queue/binding +
@@ -81,9 +109,7 @@ func (c *AMQPClient) declareStage(s StageSpec) error {
 
 	if s.DLX {
 		dlx := s.Exchange + ".dlx"
-		// fetch.queue -> fetch.dlq (тот же паттерн, что и CLAUDE.md §4.3/§5:
-		// суффикс .queue отбрасывается, не .dlx приклеивается поверх .queue)
-		dlq := s.Queue[:len(s.Queue)-len(".queue")] + ".dlq"
+		dlq := DLQName(s.Queue)
 
 		if err := c.ch.ExchangeDeclare(dlx, "fanout", true, false, false, false, nil); err != nil {
 			return fmt.Errorf("declare dlx %s: %w", dlx, err)
@@ -111,7 +137,7 @@ func (c *AMQPClient) declareStage(s StageSpec) error {
 		// Ступени без binding'а к какому-либо exchange: публикуются через
 		// дефолтный exchange по имени очереди (см. retry() ниже).
 		for attempt := 1; attempt <= core.MaxRetryAttempts; attempt++ {
-			name := retryQueueName(s.Queue, attempt)
+			name := RetryQueueName(s.Queue, attempt)
 			if _, err := c.ch.QueueDeclare(name, true, false, false, false, retryQueueArgs(s.Queue, attempt)); err != nil {
 				return fmt.Errorf("declare retry queue %s: %w", name, err)
 			}
@@ -161,7 +187,7 @@ func (c *AMQPClient) retry(ctx context.Context, queue string, d amqp.Delivery) e
 		// Nack без requeue → x-dead-letter-exchange основной очереди → DLQ.
 		return d.Nack(false, false)
 	}
-	err := c.publish(ctx, "", retryQueueName(queue, next), amqp.Publishing{
+	err := c.publish(ctx, "", RetryQueueName(queue, next), amqp.Publishing{
 		ContentType:  d.ContentType,
 		DeliveryMode: amqp.Persistent,
 		Headers:      amqp.Table{attemptHeader: int32(next)},

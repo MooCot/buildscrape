@@ -12,6 +12,9 @@ import (
 	storagedomain "buildscrape/internal/storage/domain"
 
 	"buildscrape/internal/platform/config"
+	"buildscrape/internal/platform/observability"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // runServe — composition root роли "serve" (HTTP API + admin, F6/F7/F8/F9).
@@ -39,6 +42,21 @@ func runServe() error {
 	mux := http.NewServeMux()
 	storageadapterinbound.NewHTTPHandler(queryService).Routes(mux)
 	storageadapterinbound.NewAdminHandler(adminService, cfg.AdminToken).Routes(mux)
+
+	// F11/П-metrics (MODEL-buildscrape.md §8, CLAUDE.md §10.3) — только
+	// serve опрашивает длину очередей, не каждый worker <stage> отдельно
+	// (не дублировать нагрузку на брокер ради одной и той же цифры). Сам
+	// AMQP-коннект под это — serve раньше вообще не трогал очередь.
+	q, err := newQueueClient(cfg.RabbitMQURL)
+	if err != nil {
+		return fmt.Errorf("queue connect: %w", err)
+	}
+	if closer, ok := q.(interface{ Close() error }); ok {
+		defer closer.Close()
+	}
+	recorder := observability.NewPrometheusRecorder()
+	mux.Handle("/metrics", promhttp.Handler())
+	go runQueueLengthPoller(ctx, q, recorder)
 
 	srv := &http.Server{Addr: ":8080", Handler: mux}
 	go func() {

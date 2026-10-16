@@ -45,10 +45,30 @@ func (c *fakeConn) Consume(ctx context.Context, queueName string, prefetch int) 
 	return nil, errors.New("not used by EventRecorder")
 }
 
+func (c *fakeConn) QueueLength(ctx context.Context, queueName string) (int, error) {
+	return 0, errors.New("not used by EventRecorder")
+}
+
+type fakeRecorder struct {
+	incN            int
+	lastStage       string
+	lastStatus      string
+	observeDuration int
+}
+
+func (f *fakeRecorder) IncProcessed(stage, status string) {
+	f.incN++
+	f.lastStage, f.lastStatus = stage, status
+}
+
+func (f *fakeRecorder) ObserveDuration(stage string, seconds float64) { f.observeDuration++ }
+func (f *fakeRecorder) SetQueueLength(queue string, n int)            {}
+
 func TestEventRecorder_WritesRowAndPublishes(t *testing.T) {
 	pool := &fakePool{}
 	conn := &fakeConn{}
-	r := NewEventRecorder(pool, conn)
+	rec := &fakeRecorder{}
+	r := NewEventRecorder(pool, conn, rec)
 
 	if err := r.PublishStageEvent(context.Background(), uuid.New(), "parse", "done", ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -59,6 +79,9 @@ func TestEventRecorder_WritesRowAndPublishes(t *testing.T) {
 	if conn.publishN != 1 {
 		t.Fatalf("expected exactly one AMQP publish, got %d", conn.publishN)
 	}
+	if rec.incN != 1 || rec.lastStage != "parse" || rec.lastStatus != "done" {
+		t.Fatalf("expected IncProcessed(parse, done) exactly once, got n=%d stage=%q status=%q", rec.incN, rec.lastStage, rec.lastStatus)
+	}
 }
 
 // Запись в pipeline_events — обязательная часть результата стадии (MODEL
@@ -68,7 +91,8 @@ func TestEventRecorder_WritesRowAndPublishes(t *testing.T) {
 func TestEventRecorder_DBErrorPropagates(t *testing.T) {
 	pool := &fakePool{execErr: errors.New("connection reset")}
 	conn := &fakeConn{}
-	r := NewEventRecorder(pool, conn)
+	rec := &fakeRecorder{}
+	r := NewEventRecorder(pool, conn, rec)
 
 	err := r.PublishStageEvent(context.Background(), uuid.New(), "ai", "error", "boom")
 	if err == nil {
@@ -76,6 +100,9 @@ func TestEventRecorder_DBErrorPropagates(t *testing.T) {
 	}
 	if conn.publishN != 0 {
 		t.Fatalf("expected no AMQP publish after a failed DB write, got %d", conn.publishN)
+	}
+	if rec.incN != 0 {
+		t.Fatalf("expected IncProcessed NOT called when the DB write fails, got %d calls", rec.incN)
 	}
 }
 
@@ -86,7 +113,7 @@ func TestEventRecorder_DBErrorPropagates(t *testing.T) {
 func TestEventRecorder_PublishErrorIsSwallowed(t *testing.T) {
 	pool := &fakePool{}
 	conn := &fakeConn{publishErr: errors.New("no connection")}
-	r := NewEventRecorder(pool, conn)
+	r := NewEventRecorder(pool, conn, &fakeRecorder{})
 
 	if err := r.PublishStageEvent(context.Background(), uuid.New(), "media", "done", ""); err != nil {
 		t.Fatalf("expected AMQP publish failure to be swallowed, got error: %v", err)
@@ -98,7 +125,7 @@ func TestEventRecorder_PublishErrorIsSwallowed(t *testing.T) {
 
 func TestEventRecorder_EmptyErrorBecomesNilArg(t *testing.T) {
 	pool := &fakePool{}
-	r := NewEventRecorder(pool, &fakeConn{})
+	r := NewEventRecorder(pool, &fakeConn{}, &fakeRecorder{})
 
 	if err := r.PublishStageEvent(context.Background(), uuid.New(), "geocode", "done", ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)

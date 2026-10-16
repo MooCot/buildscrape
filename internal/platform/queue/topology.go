@@ -1,5 +1,7 @@
 package queue
 
+import "buildscrape/internal/core"
+
 // StageSpec — топология одной стадии: имя очереди, её exchange (+тип),
 // routing key для bind (пусто — для direct/fanout, паттерн — для topic),
 // нужен ли ей персональный dead-letter exchange/queue. Соответствует
@@ -35,3 +37,24 @@ var Topology = []StageSpec{
 // СВОЮ очередь с уникальным/exclusive именем при подключении — это его
 // забота при потреблении, не общей декларации при старте.
 const PipelineEventsExchange = "pipeline.events"
+
+// AllQueueNames — все очереди топологии, включая retry-ступени и DLQ, в
+// одном месте (F11/П-metrics, MODEL-buildscrape.md, CLAUDE.md §10.3) —
+// опрос длины очередей не собирает этот список второй раз сам, а только
+// добавляет к основной очереди retry/DLQ-варианты той же формулой, что
+// Declare уже использует при декларации (RetryQueueName/DLQName).
+func AllQueueNames(specs []StageSpec) []string {
+	names := make([]string, 0, len(specs)*(1+core.MaxRetryAttempts+1))
+	for _, s := range specs {
+		names = append(names, s.Queue)
+		if s.Retry {
+			for attempt := 1; attempt <= core.MaxRetryAttempts; attempt++ {
+				names = append(names, RetryQueueName(s.Queue, attempt))
+			}
+		}
+		if s.DLX {
+			names = append(names, DLQName(s.Queue))
+		}
+	}
+	return names
+}

@@ -46,6 +46,10 @@ func (c *Client) Publish(ctx context.Context, exchange, routingKey string, body 
 	return nil
 }
 
+func (c *Client) QueueLength(ctx context.Context, queueName string) (int, error) {
+	return 0, nil
+}
+
 func (c *Client) Consume(ctx context.Context, queueName string, prefetch int) (<-chan queue.Delivery, error) {
 	ch := make(chan queue.Delivery, len(c.Deliveries))
 	for _, d := range c.Deliveries {

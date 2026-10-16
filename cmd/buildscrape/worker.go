@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
+	"net/http"
 	"os/signal"
 	"syscall"
 	"time"
@@ -35,8 +37,10 @@ import (
 
 	"buildscrape/internal/core"
 	"buildscrape/internal/platform/config"
+	"buildscrape/internal/platform/observability"
 	"buildscrape/internal/platform/queue"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -89,9 +93,31 @@ func runWorker(stage string) error {
 	// действия либо ещё нет Item (Fetch, FK pipeline_events.item_id →
 	// items.id не позволит), либо действие над Source, а не над Item
 	// (Storage F7/F8/F9).
+	// Recorder — тоже пропускается для cleanup (симметрично q выше): нет
+	// HTTP /metrics для этой роли (prometheus.yml её не скрейпит, CLAUDE.md
+	// §10.2), поэтому метрики ей не нужны, не только AMQP.
+	var recorder observability.Recorder
 	var events *sharedadapteroutbound.EventRecorder
 	if stage != "cleanup" {
-		events = sharedadapteroutbound.NewEventRecorder(pool, q)
+		recorder = observability.NewPrometheusRecorder()
+		events = sharedadapteroutbound.NewEventRecorder(pool, q, recorder)
+
+		// /metrics — тот же паттерн, что serve.go (CLAUDE.md §10.4);
+		// prometheus.yml уже целится в :8080 у каждой worker-* роли
+		// (кроме cleanup, он не в scrape-targets). Сбой этого листенера —
+		// не причина проваливать основной pipeline-путь (observability —
+		// best-effort, как и весь этот порт, §10.5), поэтому ошибка только
+		// логируется, не возвращается из runWorker.
+		metricsSrv := &http.Server{Addr: ":8080", Handler: promhttp.Handler()}
+		go func() {
+			<-ctx.Done()
+			_ = metricsSrv.Shutdown(context.Background())
+		}()
+		go func() {
+			if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("worker %s: /metrics listener: %v", stage, err)
+			}
+		}()
 	}
 
 	dbMode := "noop"
@@ -120,7 +146,7 @@ func runWorker(stage string) error {
 
 		g, gctx := errgroup.WithContext(ctx)
 		g.Go(func() error { return fetchadapterinbound.NewPollTrigger(svc, 30*time.Second).Run(gctx) })
-		g.Go(func() error { return fetchadapterinbound.NewAMQPConsumer(q, svc).Run(gctx) })
+		g.Go(func() error { return fetchadapterinbound.NewAMQPConsumer(q, svc, recorder).Run(gctx) })
 		// Первая вернувшаяся ошибка отменяет gctx и останавливает вторую
 		// горутину — иначе при обрыве соединения consumer'а планировщик
 		// продолжал бы плодить задания в никуда.
@@ -129,7 +155,7 @@ func runWorker(stage string) error {
 	case "parse":
 		parsePub := parseadapteroutbound.NewAMQPPublisher(q) // NextStagePublisher (хендофф задания)
 		svc := parsedomain.NewService(parseadapteroutbound.HTMLExtractor{}, parseadapteroutbound.NewPostgresItemWriter(pool), parsePub, events)
-		err = parseadapterinbound.NewAMQPConsumer(q, svc).Run(ctx)
+		err = parseadapterinbound.NewAMQPConsumer(q, svc, recorder).Run(ctx)
 
 	case "media":
 		svc := mediadomain.NewService(
@@ -139,7 +165,7 @@ func runWorker(stage string) error {
 			mediaadapteroutbound.NewPostgresMediaWriter(pool),
 			events,
 		)
-		err = mediaadapterinbound.NewAMQPConsumer(q, svc).Run(ctx)
+		err = mediaadapterinbound.NewAMQPConsumer(q, svc, recorder).Run(ctx)
 
 	case "geocode":
 		svc := geocodedomain.NewService(
@@ -149,7 +175,7 @@ func runWorker(stage string) error {
 			geocodeadapteroutbound.NewPostgresItemGeoWriter(pool),
 			events,
 		)
-		err = geocodeadapterinbound.NewAMQPConsumer(q, svc).Run(ctx)
+		err = geocodeadapterinbound.NewAMQPConsumer(q, svc, recorder).Run(ctx)
 
 	case "ai":
 		providers := []aidomain.Provider{
@@ -163,7 +189,7 @@ func runWorker(stage string) error {
 			aiadapteroutbound.NewPostgresItemAIWriter(pool),
 			events,
 		)
-		err = aiadapterinbound.NewAMQPConsumer(q, svc).Run(ctx)
+		err = aiadapterinbound.NewAMQPConsumer(q, svc, recorder).Run(ctx)
 
 	case "cleanup":
 		// Без domain/adapter-расщепления — см. internal/cleanup/purge.go doc-comment.
